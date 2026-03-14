@@ -7,8 +7,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::channels::wasm::{
-    LoadedChannel, RegisteredEndpoint, SharedWasmChannel, WasmChannel, WasmChannelLoader,
-    WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig, create_wasm_channel_router,
+    LoadedChannel, RegisteredEndpoint, SharedWasmChannel, SlackSocketModeSettings, WasmChannel,
+    WasmChannelLoader, WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
+    create_wasm_channel_router,
 };
 use crate::config::Config;
 use crate::db::Database;
@@ -109,6 +110,16 @@ async fn register_channel(
     let channel_name = loaded.name().to_string();
     tracing::info!("Loaded WASM channel: {}", channel_name);
 
+    let slack_socket_mode = if channel_name == "slack" {
+        loaded
+            .capabilities_file
+            .as_ref()
+            .and_then(|f| SlackSocketModeSettings::from_config(&f.config).ok())
+            .filter(|settings| settings.is_enabled())
+    } else {
+        None
+    };
+
     let secret_name = loaded.webhook_secret_name();
     let sig_key_secret_name = loaded.signature_key_secret_name();
     let hmac_secret_name = loaded.hmac_secret_name();
@@ -126,14 +137,22 @@ async fn register_channel(
     let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
 
     let webhook_path = format!("/webhook/{}", channel_name);
-    let endpoints = vec![RegisteredEndpoint {
-        channel_name: channel_name.clone(),
-        path: webhook_path,
-        methods: vec!["POST".to_string()],
-        require_secret: webhook_secret.is_some(),
-    }];
+    let endpoints = if slack_socket_mode.is_some() {
+        Vec::new()
+    } else {
+        vec![RegisteredEndpoint {
+            channel_name: channel_name.clone(),
+            path: webhook_path,
+            methods: vec!["POST".to_string()],
+            require_secret: webhook_secret.is_some(),
+        }]
+    };
 
-    let channel_arc = Arc::new(loaded.channel);
+    let mut channel = loaded.channel;
+    if let Some(settings) = slack_socket_mode.clone() {
+        channel = channel.with_slack_socket_mode(settings);
+    }
+    let channel_arc = Arc::new(channel);
 
     // Inject runtime config (tunnel URL, webhook secret, owner_id).
     {
@@ -179,14 +198,16 @@ async fn register_channel(
         "Registering channel with router"
     );
 
-    wasm_router
-        .register(
-            Arc::clone(&channel_arc),
-            endpoints,
-            webhook_secret.clone(),
-            secret_header,
-        )
-        .await;
+    if !endpoints.is_empty() {
+        wasm_router
+            .register(
+                Arc::clone(&channel_arc),
+                endpoints,
+                webhook_secret.clone(),
+                secret_header,
+            )
+            .await;
+    }
 
     // Register Ed25519 signature key if declared in capabilities.
     if let Some(ref sig_key_name) = sig_key_secret_name
@@ -207,7 +228,8 @@ async fn register_channel(
     }
 
     // Register HMAC signing secret if declared in capabilities.
-    if let Some(ref hmac_secret_name) = hmac_secret_name
+    if slack_socket_mode.is_none()
+        && let Some(ref hmac_secret_name) = hmac_secret_name
         && let Some(secrets) = secrets_store
         && let Ok(secret) = secrets.get_decrypted("default", hmac_secret_name).await
     {

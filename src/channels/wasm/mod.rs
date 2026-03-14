@@ -88,6 +88,7 @@ mod runtime;
 mod schema;
 pub mod setup;
 pub(crate) mod signature;
+mod slack_socket_mode;
 #[allow(dead_code)]
 pub(crate) mod storage;
 mod wrapper;
@@ -107,4 +108,9 @@ pub use schema::{
     ChannelCapabilitiesFile, ChannelConfig, SecretSetupSchema, SetupSchema, WebhookSchema,
 };
 pub use setup::{WasmChannelSetup, inject_channel_credentials, setup_wasm_channels};
+pub use slack_socket_mode::{
+    SlackSocketModeBridgeConfig, SlackSocketModeForwarder, SlackSocketModeHandle,
+    SlackSocketModeSettings, SlackTransportMode, SocketModeEnvelope, ack_payload,
+    start_slack_socket_mode_bridge,
+};
 pub use wrapper::{HttpResponse, SharedWasmChannel, WasmChannel};

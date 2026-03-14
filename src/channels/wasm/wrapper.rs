@@ -48,6 +48,10 @@ use crate::channels::wasm::host::{
 use crate::channels::wasm::router::RegisteredEndpoint;
 use crate::channels::wasm::runtime::{PreparedChannelModule, WasmChannelRuntime};
 use crate::channels::wasm::schema::ChannelConfig;
+use crate::channels::wasm::slack_socket_mode::{
+    SlackSocketModeForwarder, SlackSocketModeHandle, SlackSocketModeSettings,
+    start_slack_socket_mode_bridge,
+};
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
 use crate::pairing::PairingStore;
@@ -712,6 +716,12 @@ pub struct WasmChannel {
     /// Secrets store for host-based credential injection.
     /// Used to pre-resolve credentials before each WASM callback.
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+
+    /// Optional Socket Mode settings for the Slack WASM channel.
+    slack_socket_mode: Option<SlackSocketModeSettings>,
+
+    /// Host-side Slack Socket Mode bridge handle, when active.
+    slack_socket_mode_handle: RwLock<Option<SlackSocketModeHandle>>,
 }
 
 /// Update broadcast metadata in memory and persist to the settings store when
@@ -774,6 +784,8 @@ impl WasmChannel {
             last_broadcast_metadata: Arc::new(tokio::sync::RwLock::new(None)),
             settings_store,
             secrets_store: None,
+            slack_socket_mode: None,
+            slack_socket_mode_handle: RwLock::new(None),
         }
     }
 
@@ -784,6 +796,12 @@ impl WasmChannel {
     /// the target host (e.g., Bearer token for api.slack.com).
     pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self {
         self.secrets_store = Some(store);
+        self
+    }
+
+    /// Enable the host-side Slack Socket Mode bridge for this channel.
+    pub fn with_slack_socket_mode(mut self, settings: SlackSocketModeSettings) -> Self {
+        self.slack_socket_mode = Some(settings);
         self
     }
 
@@ -2576,6 +2594,84 @@ impl std::fmt::Debug for WasmChannel {
     }
 }
 
+struct WasmChannelSocketModeForwarder {
+    channel: Arc<WasmChannel>,
+}
+
+#[async_trait]
+impl SlackSocketModeForwarder for WasmChannelSocketModeForwarder {
+    async fn forward_events_api_payload(&self, payload: serde_json::Value) -> Result<(), String> {
+        let body = serde_json::to_vec(&payload)
+            .map_err(|e| format!("Failed to serialize Slack Socket Mode payload: {e}"))?;
+        let headers = HashMap::new();
+        let query = HashMap::new();
+        let response = self
+            .channel
+            .call_on_http_request("POST", "/webhook/slack", &headers, &query, &body, true)
+            .await
+            .map_err(|e| format!("Slack Socket Mode dispatch failed: {e}"))?;
+
+        if response.status >= 400 {
+            return Err(format!(
+                "Slack Socket Mode dispatch returned HTTP {}",
+                response.status
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+impl WasmChannel {
+    async fn start_slack_socket_mode_bridge(self: &Arc<Self>) -> Result<(), ChannelError> {
+        let Some(settings) = self.slack_socket_mode.clone() else {
+            return Ok(());
+        };
+
+        if self.slack_socket_mode_handle.read().await.is_some() {
+            return Ok(());
+        }
+
+        let secrets = self
+            .secrets_store
+            .as_ref()
+            .ok_or_else(|| ChannelError::StartupFailed {
+                name: self.name.clone(),
+                reason: "Slack Socket Mode requires a secrets store".to_string(),
+            })?;
+
+        let app_token = secrets
+            .get_decrypted("default", &settings.app_token_secret_name)
+            .await
+            .map_err(|e| ChannelError::StartupFailed {
+                name: self.name.clone(),
+                reason: format!(
+                    "Slack Socket Mode app token '{}' is required: {}",
+                    settings.app_token_secret_name, e
+                ),
+            })?
+            .expose()
+            .to_string();
+
+        let forwarder: Arc<dyn SlackSocketModeForwarder> =
+            Arc::new(WasmChannelSocketModeForwarder {
+                channel: Arc::clone(self),
+            });
+        let handle = start_slack_socket_mode_bridge(forwarder, app_token, settings.bridge_config());
+        *self.slack_socket_mode_handle.write().await = Some(handle);
+        tracing::info!(channel = %self.name, "Started Slack Socket Mode bridge");
+
+        Ok(())
+    }
+
+    async fn stop_slack_socket_mode_bridge(&self) {
+        if let Some(handle) = self.slack_socket_mode_handle.write().await.take() {
+            handle.shutdown().await;
+            tracing::info!(channel = %self.name, "Stopped Slack Socket Mode bridge");
+        }
+    }
+}
+
 // ============================================================================
 // Shared Channel Wrapper
 // ============================================================================
@@ -2616,7 +2712,12 @@ impl Channel for SharedWasmChannel {
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
-        self.inner.start().await
+        let stream = self.inner.start().await?;
+        if let Err(e) = self.inner.start_slack_socket_mode_bridge().await {
+            self.inner.shutdown().await?;
+            return Err(e);
+        }
+        Ok(stream)
     }
 
     async fn respond(
@@ -2648,6 +2749,7 @@ impl Channel for SharedWasmChannel {
     }
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
+        self.inner.stop_slack_socket_mode_bridge().await;
         self.inner.shutdown().await
     }
 }
@@ -3067,9 +3169,11 @@ mod tests {
     use crate::channels::wasm::runtime::{
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
-    use crate::channels::wasm::wrapper::{HttpResponse, WasmChannel};
+    use crate::channels::wasm::slack_socket_mode::{SlackSocketModeSettings, SlackTransportMode};
+    use crate::channels::wasm::wrapper::{HttpResponse, SharedWasmChannel, WasmChannel};
+    use crate::error::ChannelError;
     use crate::pairing::PairingStore;
-    use crate::testing::credentials::TEST_TELEGRAM_BOT_TOKEN;
+    use crate::testing::credentials::{TEST_TELEGRAM_BOT_TOKEN, test_secrets_store};
     use crate::tools::wasm::ResourceLimits;
 
     fn create_test_channel() -> WasmChannel {
@@ -3141,6 +3245,28 @@ mod tests {
 
         // Health check should fail after shutdown
         assert!(channel.health_check().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_shared_channel_start_fails_when_slack_socket_mode_token_missing() {
+        let secrets = Arc::new(test_secrets_store());
+        let channel = create_test_channel()
+            .with_secrets_store(secrets)
+            .with_slack_socket_mode(SlackSocketModeSettings {
+                transport: SlackTransportMode::SocketMode,
+                ..SlackSocketModeSettings::default()
+            });
+        let shared = SharedWasmChannel::new(Arc::new(channel));
+
+        let result = shared.start().await;
+        assert!(result.is_err(), "start should fail without app token");
+        let err = result.err().unwrap();
+        match err {
+            ChannelError::StartupFailed { reason, .. } => {
+                assert!(reason.contains("slack_app_token"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[tokio::test]
