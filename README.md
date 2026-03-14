@@ -303,6 +303,7 @@ cargo test test_name
 ```
 
 - **Telegram channel**: See [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) for setup and DM pairing.
+- **Slack channel**: The bundled Slack WASM channel now supports either webhook transport (`SLACK_SIGNING_SECRET`) or Socket Mode (`SLACK_APP_TOKEN` with `connections:write`).
 - **Changing channel sources**: Run `./channels-src/telegram/build.sh` before `cargo build` so the updated WASM is bundled.
 
 ## OpenClaw Heritage

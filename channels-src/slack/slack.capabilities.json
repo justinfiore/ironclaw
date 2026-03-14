@@ -12,9 +12,14 @@
         "optional": false
       },
       {
+        "name": "slack_app_token",
+        "prompt": "Optional for Socket Mode: enter your Slack App-Level Token (starts with xapp-) with the connections:write scope from Basic Information > App-Level Tokens.",
+        "optional": true
+      },
+      {
         "name": "slack_signing_secret",
-        "prompt": "Enter your Slack App Signing Secret (found under Basic Information > App Credentials in your Slack App settings).",
-        "optional": false
+        "prompt": "Optional for webhook transport: enter your Slack App Signing Secret from Basic Information > App Credentials.",
+        "optional": true
       }
     ],
     "setup_url": "https://api.slack.com/apps"
@@ -53,6 +58,8 @@
     }
   },
   "config": {
+    "transport": "webhook",
+    "app_token_secret_name": "slack_app_token",
     "signing_secret_name": "slack_signing_secret",
     "owner_id": null,
     "dm_policy": "pairing",

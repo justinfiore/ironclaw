@@ -27,6 +27,7 @@
     "provider": "Slack",
     "secrets": [
       "slack_bot_token",
+      "slack_app_token",
       "slack_signing_secret"
     ],
     "shared_auth": null,

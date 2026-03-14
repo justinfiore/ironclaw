@@ -71,7 +71,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Telegram | ✅ | ✅ | - | WASM channel(MTProto), DM pairing, caption, /start, bot_username, DM topics |
 | Discord | ✅ | ❌ | P2 | discord.js, thread parent binding inheritance |
 | Signal | ✅ | ✅ | P2 | signal-cli daemonPC, SSE listener HTTP/JSON-R, user/group allowlists, DM pairing |
-| Slack | ✅ | ✅ | - | WASM tool |
+| Slack | ✅ | ✅ | - | WASM channel with webhook transport and host-side Socket Mode bridge |
 | iMessage | ✅ | ❌ | P3 | BlueBubbles or Linq recommended |
 | Linq | ✅ | ❌ | P3 | Real iMessage via API, no Mac required |
 | Feishu/Lark | ✅ | ❌ | P3 | Bitable create app/field tools, Docx table/image/file actions, rich-text media extraction |
